@@ -45,6 +45,6 @@ def scoreSubmission(predictor, verbose=False):
     if verbose: print("computing predictions...")
     predictions = predictor(train)
     if verbose: print("scoring answer...")
-    return scoreResult(predictions, test, verbose=verbose)
+    return scoreResult(predictions, test, verbose=verbose), predictions
 
 # -- ==scoreResult== --
