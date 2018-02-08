@@ -68,14 +68,20 @@ def createRegressors(X0, X1, id3s, verbose=False):
 # -- ==computePredictions== --
 
 def computePredictions(users, regressors, maxDayTrain, userId3Visits, duration, id3s, verbose=False):
-    predictions = {user: {} for user in users}
+    visited, profiles = {}, []
     for i, user in enumerate(users):
-        if verbose: reportProgress("predicting user behaviour", i, len(users))
-        prof = createFeatures(user, maxDayTrain, userId3Visits, id3s, duration=duration, sums=True)
-        visited = sum([userId3Visits[(user, d)] if (user, d) in userId3Visits else [] for d in range(max(0, maxDayTrain - 21), maxDayTrain)], [])
-        for id3, regressor in regressors.items():
-            if not id3 in visited:
-                predictions[user][id3] = regressor.predict([prof])[0]
+        if verbose: reportProgress("computing eligible id3s", i, len(users))
+        profiles.append(createFeatures(user, maxDayTrain, userId3Visits, id3s, duration=duration, sums=True))
+        visited[user] = sum([userId3Visits[(user, d)] if (user, d) in userId3Visits else [] for d in range(max(0, maxDayTrain - 21), maxDayTrain)], [])
+        
+    predictions = {user: {} for user in users}
+    for i, id3 in enumerate(id3s):
+        if verbose: reportProgress("predicting user behaviour", i, len(id3s))
+        if id3 in regressors:
+            tpred = regressors[id3].predict(profiles)
+            for i, user in enumerate(users):
+                if not id3 in visited[user]:
+                    predictions[user][id3] = tpred[i]
     return predictions
 
 # -- ==computePredictions== --
@@ -109,7 +115,7 @@ def extractTopPredictions(predictions, users, topCount=-1, verbose=False):
 
 # -- ==predict== --
 
-def predict(train, trainUsers=1000, verbose=False, duration=2, minImpressions=200):
+def predict(train, trainUsers=1000, verbose=False, duration=2, minImpressions=10000):
     #find id3s and users
     if verbose: print("finding users and id3s...")
     id3s = train["id3"].unique()
@@ -119,7 +125,9 @@ def predict(train, trainUsers=1000, verbose=False, duration=2, minImpressions=20
     if verbose: print("applying request filter...")
     vc = train["user_id"].value_counts()
     activeUsers = list(vc[vc >= minImpressions].index)
+    if len(activeUsers) < len(users) // 20: print("WARNING: less than 5% active users, can't predict 5%")
     train = train[train["user_id"].isin(activeUsers)]
+    if verbose: print("{} users, {} id3s, {} rows".format(len(activeUsers), len(id3s), train["id3"].count()))
     
     #compute lookup tables
     if verbose: print("computing lookup tables...")
@@ -128,11 +136,11 @@ def predict(train, trainUsers=1000, verbose=False, duration=2, minImpressions=20
     userId3Visits = userVisits(train)
     
     #predict
-    X1 = findX1Samples(id3s, userId3Visits, minDayTrain, maxDayTrain, activeUsers[:trainUsers], duration, cutoff=1000, verbose=verbose)
+    X1 = findX1Samples(id3s, userId3Visits, minDayTrain, maxDayTrain, activeUsers[:trainUsers], duration, cutoff=10000, verbose=verbose)
     X0 = findX0Samples(X1, id3s, verbose=verbose)
     regressors = createRegressors(X0, X1, id3s, verbose=verbose)
     predictions = computePredictions(activeUsers, regressors, maxDayTrain, userId3Visits, duration, id3s, verbose=verbose)
-    df = extractTopPredictions(predictions, activeUsers, verbose=verbose)
+    df = extractTopPredictions(predictions, activeUsers, topCount=max(len(activeUsers), len(users) // 20), verbose=verbose)
     return df
 
 # -- ==predict== --
