@@ -5,10 +5,13 @@
 
 def createFeatures(user, day, userId3Visits, id3s, duration=7, sums=False):
     id3Visited = []
-    for d in range(max(0, day - duration), day):
+    ret = []
+    for d in range(day, day - duration, -1):
         if (user, d) in userId3Visits:
             id3Visited += userId3Visits[(user, d)]
-    return [id3Visited.count(i) for i in id3s] + ([len(id3Visited)] if sums else [])
+        ret += [id3Visited.count(i) for i in id3s]
+        if sums: ret.append(len(id3Visited))
+    return ret
 
 # -- ==createFeatures== --
 
@@ -57,7 +60,7 @@ def createRegressors(X0, X1, id3s, verbose=False):
     regressors = {}
     for i, id3 in enumerate(id3s):
         if verbose: reportProgress("fitting regressors", i, len(id3s))
-        if len(X0[id3]) > 0 and len(X1[id3]) > 0:
+        if len(X0[id3]) > 2 and len(X1[id3]) > 2:
             regressors[id3] = RandomForestRegressor(max_depth=3, n_estimators=3).fit(X0[id3] + X1[id3], [0] * len(X0[id3]) + [1] * len(X1[id3])) 
     return regressors
 
@@ -99,7 +102,7 @@ def extractTopPredictions(predictions, users, topCount=-1, verbose=False):
     #regressorScores = {id3: regressors[id3].score(X0[id3] + X1[id3], [0] * len(X0[id3]) + [1] * len(X1[id3])) for id3 in id3s}
     predictedId3s = {user: sorted(predictions[user].keys(), key=lambda id3: -predictions[user][id3])[:5] for user in users}
     certainty = {user: sum([predictions[user][id3] for id3 in predictedId3s[user]]) for user in users}
-    topUsers = sorted(users, key=lambda user: -certainty[user])[:topCount]
+    topUsers = sorted(users, key=lambda user: (len(predictions[user]) < 5, -certainty[user]))[:topCount]
     
     #create df
     dfData = {"user_id": topUsers}
@@ -115,7 +118,7 @@ def extractTopPredictions(predictions, users, topCount=-1, verbose=False):
 
 # -- ==predict== --
 
-def predict(train, trainUsers=1000, verbose=False, duration=2, minImpressions=10000):
+def predict(train, trainUsers=1000, verbose=False, duration=5, minImpressionsUsers=100, minImpressionsId3s=100000, cutoff=25000):
     #find id3s and users
     if verbose: print("finding users and id3s...")
     id3s = train["id3"].unique()
@@ -123,11 +126,13 @@ def predict(train, trainUsers=1000, verbose=False, duration=2, minImpressions=10
     
     #apply request filter
     if verbose: print("applying request filter...")
-    vc = train["user_id"].value_counts()
-    activeUsers = list(vc[vc >= minImpressions].index)
+    vcUsers = train["user_id"].value_counts()
+    vcId3s = train["id3"].value_counts()
+    activeUsers = list(vcUsers[vcUsers >= minImpressionsUsers].index)
+    activeId3s = list(vcId3s[vcId3s >= minImpressionsId3s].index)
     if len(activeUsers) < len(users) // 20: print("WARNING: less than 5% active users, can't predict 5%")
-    train = train[train["user_id"].isin(activeUsers)]
-    if verbose: print("{} users, {} id3s, {} rows".format(len(activeUsers), len(id3s), train["id3"].count()))
+    train = train[train["user_id"].isin(activeUsers) & train["id3"].isin(activeId3s)]
+    if verbose: print("{} users ({} before filter), {} id3s ({} before filter), {} rows".format(len(activeUsers), len(users), len(activeId3s), len(id3s), train["id3"].count()))
     
     #compute lookup tables
     if verbose: print("computing lookup tables...")
@@ -136,10 +141,10 @@ def predict(train, trainUsers=1000, verbose=False, duration=2, minImpressions=10
     userId3Visits = userVisits(train)
     
     #predict
-    X1 = findX1Samples(id3s, userId3Visits, minDayTrain, maxDayTrain, activeUsers[:trainUsers], duration, cutoff=10000, verbose=verbose)
-    X0 = findX0Samples(X1, id3s, verbose=verbose)
-    regressors = createRegressors(X0, X1, id3s, verbose=verbose)
-    predictions = computePredictions(activeUsers, regressors, maxDayTrain, userId3Visits, duration, id3s, verbose=verbose)
+    X1 = findX1Samples(activeId3s, userId3Visits, minDayTrain, maxDayTrain, activeUsers[:trainUsers], duration, cutoff=cutoff, verbose=verbose)
+    X0 = findX0Samples(X1, activeId3s, verbose=verbose)
+    regressors = createRegressors(X0, X1, activeId3s, verbose=verbose)
+    predictions = computePredictions(activeUsers, regressors, maxDayTrain, userId3Visits, duration, activeId3s, verbose=verbose)
     df = extractTopPredictions(predictions, activeUsers, topCount=max(len(activeUsers), len(users) // 20), verbose=verbose)
     return df
 
