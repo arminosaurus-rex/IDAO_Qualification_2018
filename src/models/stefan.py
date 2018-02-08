@@ -18,7 +18,7 @@ def createFeatures(user, day, userId3Visits, id3s, duration=7, sums=False):
 def findX1Samples(id3s, userId3Visits, minDayTrain, maxDayTrain, users, duration, cutoff=10000, verbose=False):
     X1 = {id3: [] for id3 in id3s}
     for i, user in enumerate(users):
-        if verbose and i % 100 == 0: print("user {} of {}".format(i, len(users)))
+        if verbose: reportProgress("computation of X1 samples", i, len(users))
         for day in range(maxDayTrain, minDayTrain - 1, -1):
             feat = createFeatures(user, day, userId3Visits, id3s, duration=duration, sums=True)
             for id3 in id3s:
@@ -38,7 +38,7 @@ from random import shuffle
 def findX0Samples(X1, id3s, verbose=False):
     X0 = {}
     for i, id3 in enumerate(id3s):
-        if verbose and i % 100 == 0: print("id3 {} of {}".format(i, len(id3s)))
+        if verbose: reportProgress("computation of X0 samples", i, len(id3s))
         rows = sum([X1[i] for i in id3s if not i == id3], [])
         shuffle(rows)
         X0[id3] = rows[:len(X1[id3])]
@@ -56,7 +56,7 @@ from sklearn.ensemble import RandomForestRegressor
 def createRegressors(X0, X1, id3s, verbose=False):
     regressors = {}
     for i, id3 in enumerate(id3s):
-        if verbose and i % 100 == 0: print("regressor {} of {}".format(i, len(id3s)))
+        if verbose: reportProgress("fitting regressors", i, len(id3s))
         if len(X0[id3]) > 0 and len(X1[id3]) > 0:
             regressors[id3] = RandomForestRegressor(max_depth=3, n_estimators=3).fit(X0[id3] + X1[id3], [0] * len(X0[id3]) + [1] * len(X1[id3])) 
     return regressors
@@ -70,7 +70,7 @@ def createRegressors(X0, X1, id3s, verbose=False):
 def computePredictions(users, regressors, maxDayTrain, userId3Visits, duration, id3s, verbose=False):
     predictions = {user: {} for user in users}
     for i, user in enumerate(users):
-        if verbose and i % 1000 == 0: print("user {} of {}".format(i, len(users)))
+        if verbose: reportProgress("predicting user behaviour", i, len(users))
         prof = createFeatures(user, maxDayTrain, userId3Visits, id3s, duration=duration, sums=True)
         visited = sum([userId3Visits[(user, d)] if (user, d) in userId3Visits else [] for d in range(max(0, maxDayTrain - 21), maxDayTrain)], [])
         for id3, regressor in regressors.items():
@@ -84,6 +84,8 @@ def computePredictions(users, regressors, maxDayTrain, userId3Visits, duration, 
 
 # -- ==extractTopPredictions== --
 
+import pandas as pd
+
 def extractTopPredictions(predictions, users, topCount=-1, verbose=False):
     #sum up
     if topCount == -1:
@@ -91,7 +93,7 @@ def extractTopPredictions(predictions, users, topCount=-1, verbose=False):
     #regressorScores = {id3: regressors[id3].score(X0[id3] + X1[id3], [0] * len(X0[id3]) + [1] * len(X1[id3])) for id3 in id3s}
     predictedId3s = {user: sorted(predictions[user].keys(), key=lambda id3: -predictions[user][id3])[:5] for user in users}
     certainty = {user: sum([predictions[user][id3] for id3 in predictedId3s[user]]) for user in users}
-    topUsers = sorted(userToId3.keys(), key=lambda user: -certainty[user])[:topCount]
+    topUsers = sorted(users, key=lambda user: -certainty[user])[:topCount]
     
     #create df
     dfData = {"user_id": topUsers}
@@ -107,17 +109,30 @@ def extractTopPredictions(predictions, users, topCount=-1, verbose=False):
 
 # -- ==predict== --
 
-def predict(train, trainUsers=1000, verbose=False, duration=2):
+def predict(train, trainUsers=1000, verbose=False, duration=2, minImpressions=200):
+    #find id3s and users
+    if verbose: print("finding users and id3s...")
     id3s = train["id3"].unique()
     users = train["user_id"].unique()
+    
+    #apply request filter
+    if verbose: print("applying request filter...")
+    vc = train["user_id"].value_counts()
+    activeUsers = list(vc[vc >= minImpressions].index)
+    train = train[train["user_id"].isin(activeUsers)]
+    
+    #compute lookup tables
+    if verbose: print("computing lookup tables...")
     minDayTrain = train["date"].min()
     maxDayTrain = train["date"].max()
     userId3Visits = userVisits(train)
-    X1 = findX1Samples(id3s, userId3Visits, minDayTrain, maxDayTrain, users[:trainUsers], duration, cutoff=1000, verbose=verbose)
+    
+    #predict
+    X1 = findX1Samples(id3s, userId3Visits, minDayTrain, maxDayTrain, activeUsers[:trainUsers], duration, cutoff=1000, verbose=verbose)
     X0 = findX0Samples(X1, id3s, verbose=verbose)
     regressors = createRegressors(X0, X1, id3s, verbose=verbose)
-    predictions = computePredictions(users, regressors, maxDayTrain, userId3Visits, duration, id3s, verbose=verbose)
-    df = extractTopPredictions(predictions, users, verbose=verbose)
+    predictions = computePredictions(activeUsers, regressors, maxDayTrain, userId3Visits, duration, id3s, verbose=verbose)
+    df = extractTopPredictions(predictions, activeUsers, verbose=verbose)
     return df
 
 # -- ==predict== --
@@ -127,9 +142,34 @@ def predict(train, trainUsers=1000, verbose=False, duration=2):
 
 from ediblepickle import checkpoint
 
-@checkpoint(work_dir="data/processed", key=lambda args, kwargs: "userDayVisits")
+@checkpoint(work_dir="data/processed", key=lambda args, kwargs: "userDayVisits.{}rows".format(args[0]["id3"].count()))
 def userVisits(df):
     userId3Visits = df.groupby(["user_id", "date"])["id3"].apply(lambda x: list(set(x))).to_dict()
     return userId3Visits
 
 # -- ==userVisits== --
+
+
+# -- ==reportProgress== --
+
+import time
+import datetime
+
+progressInfo = {}
+
+def formatTime(seconds):
+    return "{}m {}s".format(round(seconds) // 60, round(seconds) % 60)
+
+def reportProgress(name, current, count, updateFrequency=15):
+    if not name in progressInfo:
+        progressInfo[name] = {"lastUpdate": time.time(), "start": time.time(), "lastCount": current}
+        print("starting {}...".format(name))
+    elif current >= count - 1:
+        print("finished {}".format(name))
+    elif time.time() - progressInfo[name]["lastUpdate"] >= updateFrequency:
+        print("computing {}, {}% done, {} elapsed, {} remaining".format(name, round(100.0 * current / count), formatTime(time.time() - progressInfo[name]["start"]), formatTime((time.time() - progressInfo[name]["lastUpdate"]) / (current - progressInfo[name]["lastCount"]) * (count - current))))
+        progressInfo[name]["lastUpdate"] = time.time()
+        progressInfo[name]["lastCount"] = current
+        
+
+# -- ==reportProgress== --
